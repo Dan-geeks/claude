@@ -15,6 +15,18 @@ plan** until the limit resets. The model name Claude Code shows stays the same.
 The installer backs up any existing `claude`/`claude-switch` it would replace. To undo
 it, delete `~/.local/bin/claude` and `~/.local/bin/claude-switch`.
 
+## Link your own accounts
+
+```sh
+claude-link status    # which plans are linked
+claude-link claude    # sign in with your Claude subscription
+claude-link chatgpt   # sign in with your ChatGPT account (needed for failover / codex mode)
+```
+
+Either plan alone works: with only Claude linked you get plain Claude Code, with only
+ChatGPT linked use `claude-switch codex`, and with both, `auto` fails over when Claude
+hits its limit. Logins stay on your machine.
+
 ## Switching plans
 
 ```sh
@@ -51,6 +63,9 @@ A Claude model sent to Codex maps to the first of these that your Codex account 
 | `opus`, `claude-opus-*` | same list as older Fable |
 | `sonnet`, `claude-sonnet-*` | `gpt-5.6-terra` |
 | `haiku`, `claude-haiku-*` | `gpt-6-luna`, `gpt-5.6-luna` |
+
+Claude Code may print `doesn't recognize the model "claude-fable-5-2"` and assume a 200k
+context window. That is cosmetic; it appears for any model id Claude Code doesn't know.
 
 The list lives in `src/providers/codex/translate/model_allowlist.rs`. You can also pick
 a model by hand in Claude Code, e.g. `/model gpt-6-astra[1m]` or `/model claude-opus-5-5`.

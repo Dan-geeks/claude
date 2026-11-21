@@ -8,7 +8,7 @@ bin="${BIN_DIR:-$HOME/.local/bin}"
 cfg="${CLAUDE_CODEX_HOME:-$HOME/.config/claude-codex}"
 mkdir -p "$bin" "$cfg"
 
-for f in claude claude-switch; do
+for f in claude claude-switch claude-link; do
   if [ -e "$bin/$f" ] && ! cmp -s "$here/$f" "$bin/$f"; then
     cp -p "$bin/$f" "$bin/$f.bak-before-claude-codex"
     echo "backed up existing $bin/$f"
@@ -21,4 +21,5 @@ done
 echo "installed to $bin"
 case ":$PATH:" in *":$bin:"*) ;; *) echo "note: $bin is not on PATH" ;; esac
 echo "Make sure $bin comes BEFORE the directory holding the real claude on PATH, then run: claude"
+echo "Link your own accounts with: claude-link claude   and   claude-link chatgpt   (check: claude-link status)"
 echo "Edit your extra instructions in $cfg/instructions.md; switch plan with: claude-switch [auto|claude|codex]"
