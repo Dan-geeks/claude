@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# `claude` launcher: runs the real Claude Code through the local claude-codex proxy.
+#
+# Backend modes (set with `claude-switch`, or per run with CLAUDE_BACKEND=...):
+#   auto    Claude first; if the Claude plan hits its usage limit, requests move to
+#           your ChatGPT (Codex) plan until the limit resets. Model names stay the same.
+#   claude  Claude only. No failover.
+#   codex   ChatGPT (Codex) only. Claude model names are mapped to the best Codex model.
+#
+# Files (all under ${CLAUDE_CODEX_HOME:-~/.config/claude-codex}):
+#   mode             the saved backend mode
+#   instructions.md  extra instructions appended to Claude Code's system prompt
+set -euo pipefail
+
+HOME_DIR="${CLAUDE_CODEX_HOME:-$HOME/.config/claude-codex}"
+PORT="${CCP_PORT:-18765}"
+mkdir -p "$HOME_DIR"
+
+mode="${CLAUDE_BACKEND:-$(cat "$HOME_DIR/mode" 2>/dev/null || echo auto)}"
+case "$mode" in auto | claude | codex) ;; *)
+  echo "claude: unknown backend '$mode' (use auto, claude or codex)" >&2
+  exit 2
+  ;;
+esac
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+real="${CLAUDE_REAL:-}"
+if [ -z "$real" ]; then
+  while IFS= read -r candidate; do
+    [ "$(readlink -f "$candidate")" = "$self" ] && continue
+    real="$candidate"
+    break
+  done < <(type -ap claude)
+fi
+if [ -z "$real" ] || [ ! -x "$real" ]; then
+  echo "claude: could not find the real Claude Code. Install it, or set CLAUDE_REAL=/path/to/claude" >&2
+  exit 1
+fi
+
+# Remote mode: use a proxy that runs on another machine (its backend mode and Codex login
+# live there). Normally reached through an SSH tunnel, e.g.
+#   ssh -N -L 18765:127.0.0.1:18765 my-server &   then   CLAUDE_CODEX_REMOTE=http://127.0.0.1:18765 claude
+if [ -n "${CLAUDE_CODEX_REMOTE:-}" ]; then
+  if ! curl -fsS -m 5 "$CLAUDE_CODEX_REMOTE/healthz" >/dev/null 2>&1; then
+    echo "claude: remote proxy at $CLAUDE_CODEX_REMOTE is not reachable (is the SSH tunnel up?)" >&2
+    exit 1
+  fi
+  export ANTHROPIC_BASE_URL="$CLAUDE_CODEX_REMOTE"
+  # Only needed if the remote proxy was started with CCP_AUTH_TOKEN. Sent in its own
+  # header so the Claude login keeps working.
+  if [ -n "${CLAUDE_CODEX_KEY:-}" ]; then
+    export ANTHROPIC_CUSTOM_HEADERS="x-claude-codex-key: $CLAUDE_CODEX_KEY"
+  fi
+  export ENABLE_TOOL_SEARCH="${ENABLE_TOOL_SEARCH:-true}"
+  remote_args=()
+  if [ -s "$HOME_DIR/instructions.md" ]; then
+    remote_args+=(--append-system-prompt "$(cat "$HOME_DIR/instructions.md")")
+  fi
+  exec "$real" "${remote_args[@]}" "$@"
+fi
+
+proxy_bin="${CLAUDE_CODEX_BIN:-$(command -v claude-codex || true)}"
+if [ -z "$proxy_bin" ]; then
+  echo "claude: claude-codex proxy not found. Run launcher/install.sh from the repo." >&2
+  exit 1
+fi
+
+healthy() { curl -fsS -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; }
+
+# (Re)start the proxy when it is down or running in a different mode.
+pidfile="$HOME_DIR/proxy.pid"
+modefile="$HOME_DIR/proxy.mode"
+if healthy && [ "$(cat "$modefile" 2>/dev/null)" != "$mode" ]; then
+  [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do healthy || break; sleep 0.3; done
+fi
+if ! healthy; then
+  case "$mode" in
+    auto) proxy_env=(CCP_FAILOVER=1) ;;
+    claude) proxy_env=(CCP_FAILOVER=0) ;;
+    codex) proxy_env=(CCP_FAILOVER=0 CCP_ALIAS_PROVIDER=codex) ;;
+  esac
+  env "${proxy_env[@]}" PORT="$PORT" nohup "$proxy_bin" serve --no-monitor \
+    >"$HOME_DIR/proxy.log" 2>&1 &
+  echo $! >"$pidfile"
+  echo "$mode" >"$modefile"
+  for _ in $(seq 1 50); do healthy && break; sleep 0.2; done
+  healthy || { echo "claude: proxy failed to start, see $HOME_DIR/proxy.log" >&2; exit 1; }
+fi
+
+export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+# Codex-only mode has no Claude login to reuse, so give Claude Code a placeholder token.
+# In auto and claude modes the real Claude login must stay in charge (no token override).
+if [ "$mode" = codex ]; then
+  export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-unused}"
+fi
+export ENABLE_TOOL_SEARCH="${ENABLE_TOOL_SEARCH:-true}"
+
+args=()
+if [ -s "$HOME_DIR/instructions.md" ]; then
+  args+=(--append-system-prompt "$(cat "$HOME_DIR/instructions.md")")
+fi
+exec "$real" "${args[@]}" "$@"

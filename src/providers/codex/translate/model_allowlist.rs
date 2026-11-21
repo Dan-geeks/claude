@@ -29,6 +29,9 @@ pub const ALLOWED_MODELS: &[&str] = &[
 /// catalog lists wins, so an account without `gpt-6-sol` still gets a working
 /// Opus slot. Without a catalog the first entry is used.
 const OPUS_TARGETS: &[&str] = &["gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol"];
+/// Newest and most capable first, for the `claude-fable-5-2` alias. The first one the
+/// account's Codex catalog lists wins, so Fable 5.2 lands on the best model available.
+const FABLE_5_2_TARGETS: &[&str] = &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol"];
 const SONNET_TARGETS: &[&str] = &["gpt-5.6-terra"];
 const HAIKU_TARGETS: &[&str] = &["gpt-6-luna", "gpt-5.6-luna"];
 
@@ -49,6 +52,7 @@ pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
     ("fable", OPUS_TARGETS),
     ("claude-fable-5", OPUS_TARGETS),
     ("claude-fable-5-1", OPUS_TARGETS),
+    ("claude-fable-5-2", FABLE_5_2_TARGETS),
 ];
 
 /// Resolve a Claude-style alias to the preferred model the account has.
@@ -364,6 +368,17 @@ mod tests {
             let r = resolve_model_request(model);
             assert_eq!(r.model, "gpt-6-sol");
         }
+    }
+
+    #[test]
+    fn fable_5_2_prefers_the_newest_model_the_catalog_lists() {
+        let both = || vec!["gpt-6-sol".to_string(), "gpt-6.1-sol".to_string()];
+        assert_eq!(alias_target_in("claude-fable-5-2", both), Some("gpt-6.1-sol"));
+        // An account without gpt-6.1-sol still gets a working model.
+        let older = || vec!["gpt-6-sol".to_string()];
+        assert_eq!(alias_target_in("claude-fable-5-2", older), Some("gpt-6-sol"));
+        // Older Fable names keep the existing preference.
+        assert_eq!(alias_target_in("claude-fable-5-1", both), Some("gpt-6-sol"));
     }
 
     #[test]

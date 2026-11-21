@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# claude-switch [auto|claude|codex]  - show or change which plan `claude` uses.
+set -euo pipefail
+HOME_DIR="${CLAUDE_CODEX_HOME:-$HOME/.config/claude-codex}"
+mkdir -p "$HOME_DIR"
+case "${1:-}" in
+  "") echo "backend: $(cat "$HOME_DIR/mode" 2>/dev/null || echo auto)" ;;
+  auto | claude | codex)
+    echo "$1" >"$HOME_DIR/mode"
+    echo "backend set to $1; it applies the next time you start claude."
+    ;;
+  *) echo "usage: claude-switch [auto|claude|codex]" >&2; exit 2 ;;
+esac

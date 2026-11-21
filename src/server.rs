@@ -270,6 +270,7 @@ pub fn app_with_features(
         chat_completions,
         images,
         transcriptions,
+        failover: Arc::new(crate::failover::Failover::from_env()),
     });
     let router = Router::new()
         .route("/healthz", get(healthz))
@@ -314,6 +315,7 @@ struct AppState {
     chat_completions: Option<Arc<ChatCompletionsBackend>>,
     images: Option<Arc<CodexImagesBackend>>,
     transcriptions: Option<Arc<CodexTranscriptionBackend>>,
+    failover: Arc<crate::failover::Failover>,
 }
 
 async fn handler_monitor(
@@ -1605,6 +1607,7 @@ async fn dispatch_request(
         }
     };
 
+    let requested_model_raw = model.to_string();
     let mut normalized_model = normalize_incoming_model(model);
     body.model = Some(normalized_model.clone());
     let session_state = if let Some(session_id) = session_id.as_deref() {
@@ -1690,6 +1693,29 @@ async fn dispatch_request(
             );
             return with_request_id(response, &req_id);
         }
+    };
+
+    // Claude hit its usage limit recently: send Claude-model traffic straight to
+    // Codex until the cooldown ends (see `failover`).
+    let codex_fallback = if state.failover.enabled()
+        && !count_tokens
+        && auto_review_route.is_none()
+        && provider.name() == "anthropic"
+    {
+        state
+            .registry
+            .provider("codex")
+            .filter(|codex| codex.missing_login_hint().is_none())
+    } else {
+        None
+    };
+    let mut served_by_failover = false;
+    let provider = match codex_fallback.as_ref() {
+        Some(codex) if state.failover.is_blocked() => {
+            served_by_failover = true;
+            Arc::clone(codex)
+        }
+        _ => provider,
     };
 
     // Only the Anthropic passthrough speaks message threads natively; the
@@ -1827,21 +1853,51 @@ async fn dispatch_request(
         }),
     };
 
-    let response = if count_tokens {
+    let identity = if auto_review_route.is_some() {
+        None
+    } else {
+        conversation_identity
+    };
+    // Keep a copy of the request so a Claude usage limit can be retried on Codex.
+    let retry_material = (codex_fallback.is_some() && !served_by_failover)
+        .then(|| (body.clone(), context.clone(), identity.clone()));
+    let mut response = if count_tokens {
         provider.handle_count_tokens(body, context).await
     } else {
         provider
-            .handle_messages_with_conversation_identity(
-                body,
-                context,
-                if auto_review_route.is_some() {
-                    None
-                } else {
-                    conversation_identity
-                },
-            )
+            .handle_messages_with_conversation_identity(body, context, identity)
             .await
     };
+    let mut provider = provider;
+    if let (Some((mut retry_body, mut retry_context, retry_identity)), Some(codex)) =
+        (retry_material, codex_fallback.as_ref())
+        && let Some(cooldown) =
+            crate::failover::limit_cooldown(response.status(), response.headers())
+    {
+        state.failover.block_for(cooldown);
+        log.warn(
+            "claude usage limit reached; failing over to codex",
+            Some(serde_json::Map::from_iter([
+                ("reqId".to_string(), json!(&req_id)),
+                ("model".to_string(), json!(&requested_model_raw)),
+                ("cooldownSecs".to_string(), json!(cooldown.as_secs())),
+            ])),
+        );
+        retry_body.extra.remove("thread");
+        retry_context.provider = codex.name().to_string();
+        response = codex
+            .handle_messages_with_conversation_identity(
+                retry_body,
+                retry_context,
+                retry_identity,
+            )
+            .await;
+        provider = Arc::clone(codex);
+        served_by_failover = true;
+    }
+    if served_by_failover && state.failover.mask_model() && !count_tokens {
+        response = crate::failover::mask_model(response, &requested_model_raw).await;
+    }
     log_request_completed(
         &log,
         RequestLogContext {
